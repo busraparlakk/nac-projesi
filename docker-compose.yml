@@ -1,0 +1,85 @@
+version: "3.9"
+
+networks:
+  nac_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  freeradius_config:
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: nac_postgres
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - nac_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: nac_redis
+    volumes:
+      - redis_data:/data
+    networks:
+      - nac_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: ./api
+    container_name: nac_api
+    env_file: .env
+    ports:
+      - "8000:8000"
+    networks:
+      - nac_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  freeradius:
+    image: freeradius/freeradius-server:latest-3.2
+    container_name: nac_freeradius
+    env_file: .env
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+    volumes:
+      - ./freeradius/config:/etc/freeradius/3.0
+    networks:
+      - nac_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "radtest", "healthcheck", "healthcheck", "localhost", "0", "testing123"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
