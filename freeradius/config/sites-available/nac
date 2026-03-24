@@ -14,11 +14,17 @@ server nac {
 
     authorize {
         if ("%{User-Name}" =~ /^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i) {
-            update control {
-                Auth-Type := Accept
-            }
             rest
-            ok
+            if (ok || updated) {
+                update control {
+                    Auth-Type := Accept
+                }
+            }
+            else {
+                update control {
+                    Auth-Type := Reject
+                }
+            }
         }
         else {
             rest
