@@ -1,0 +1,59 @@
+server nac {
+
+    listen {
+        type        = auth
+        ipaddr      = *
+        port        = 1812
+    }
+
+    listen {
+        type        = acct
+        ipaddr      = *
+        port        = 1813
+    }
+
+    authorize {
+        if ("%{User-Name}" =~ /^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i) {
+            update control {
+                Auth-Type := Accept
+            }
+            rest
+            ok
+        }
+        else {
+            rest
+            if (ok || updated) {
+                update control {
+                    Auth-Type := rest
+                }
+            }
+        }
+        sql
+    }
+
+    authenticate {
+        Auth-Type rest {
+            rest
+        }
+        Auth-Type Accept {
+            ok
+        }
+    }
+
+    preacct {
+        preprocess
+        suffix
+    }
+
+    accounting {
+        rest
+        sql
+    }
+
+    post-auth {
+        sql
+        Post-Auth-Type REJECT {
+            sql
+        }
+    }
+}
