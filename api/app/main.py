@@ -6,13 +6,11 @@ import redis.asyncio as aioredis
 import os
 import json
 import time
-from passlib.context import CryptContext
+import bcrypt as _bcrypt
 from datetime import datetime
 
 app = FastAPI(title="NAC Policy Engine", version="1.0.0")
 
-# --- Şifre hashing ---
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # --- Ayarlar ---
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://radius:radius_secret@postgres:5432/radius")
@@ -144,7 +142,7 @@ async def authenticate(req: AuthRequest):
     # Şifre doğrulama (bcrypt veya plaintext fallback)
     stored = user["value"]
     if stored.startswith("$2b$"):
-        valid = pwd_context.verify(req.password, stored)
+        valid = _bcrypt.checkpw(req.password.encode(), stored.encode())
     else:
         valid = (req.password == stored)  # init.sql'deki test kullanıcıları için
 
@@ -159,18 +157,61 @@ async def authenticate(req: AuthRequest):
 @app.post("/authorize")
 async def authorize(req: AuthorizeRequest):
     """
-    Kullanıcının grubuna göre VLAN atribütlerini döner.
-    FreeRADIUS rlm_rest bu endpoint'i çağırır.
+    Kullanıcının grubuna göre VLAN attribute'larını döndürür.
+    Eğer kullanıcı adı MAC adresi formatındaysa istek MAB (MAC Authentication Bypass)
+    olarak işlenir.
     """
+    import re
+
+    # MAC adresi regex deseni (aa:bb:cc:dd:ee:ff veya aa-bb-cc-dd-ee-ff)
+    mac_pattern = re.compile(
+        r'^([0-9a-f]{2}[:\-]){5}[0-9a-f]{2}$',
+        re.IGNORECASE
+    )
+
+    # --- MAB akışı ---
+    if mac_pattern.match(req.username):
+        mac_normalized = req.username.lower()
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM mac_whitelist
+                WHERE mac_address = $1 AND is_active = TRUE
+                """,
+                mac_normalized
+            )
+
+        if not row:
+            raise HTTPException(
+                status_code=401,
+                detail="MAC not authorized"
+            )
+
+        vlan_attrs = await get_group_vlan(row["groupname"])
+
+        return {
+            "code": 2,
+            "reply": vlan_attrs,
+            "group": row["groupname"],
+        }
+
+    # --- Normal kullanıcı akışı ---
     groupname = await get_user_group(req.username)
+
     if not groupname:
-        raise HTTPException(status_code=404, detail="User group not found")
+        raise HTTPException(
+            status_code=404,
+            detail="User group not found"
+        )
 
     vlan_attrs = await get_group_vlan(groupname)
+
     return {
         "code": 2,
         "reply": vlan_attrs,
-        "group": groupname
+        "group": groupname,
     }
 
 
@@ -270,7 +311,7 @@ async def create_user(req: UserCreate):
     """
     Yeni kullanıcı ekler (şifre bcrypt ile hash'lenir).
     """
-    hashed = pwd_context.hash(req.password)
+    hashed = _bcrypt.hashpw(req.password.encode(), _bcrypt.gensalt()).decode()
     async with db_pool.acquire() as conn:
         exists = await conn.fetchrow(
             "SELECT id FROM radcheck WHERE username=$1", req.username
